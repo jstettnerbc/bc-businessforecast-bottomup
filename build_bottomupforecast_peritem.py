@@ -238,25 +238,22 @@ def build_full_forecast(available_stock,
         if current_status == 'AUSLAUF':
             stock_df['missed_sales_qty'] = 0.
 
-    stock_df['stock_balance_value'] = stock_df['stock_balance'] * current_unitcost
-    stock_df['productrevenue'] = stock_df['outgoing_qty'] * current_netprice
-    stock_df['missed_productrevenue'] = stock_df['missed_sales_qty'] * current_netprice
+    #stock_df['stock_balance_value'] = stock_df['stock_balance'] * current_unitcost
+    #stock_df['productrevenue'] = stock_df['outgoing_qty'] * current_netprice
+    #stock_df['missed_productrevenue'] = stock_df['missed_sales_qty'] * current_netprice
 
     return stock_df
 
 def run_chain_for_item(item_no):
     current_item_facts = get_item_facts(item_no)
-    print(current_item_facts["if2.availableStock"])
-    print(current_item_facts["if2.unitCost"])
 
     demand = get_demand_fc(item_no)
     incoming = get_incoming_pos(item_no)
     
     fc = build_full_forecast(
     available_stock=current_item_facts["if2.availableStock"].iloc[0],
-    current_unitcost = current_item_facts["if2.unitCost"].iloc[0],
-    current_netprice = current_item_facts['salesPriceNettoDE'].iloc[0],
-    #current_item_facts['msp.mean_salesprice'].iloc[0],
+    current_unitcost = None, #current_item_facts["if2.unitCost"].iloc[0],
+    current_netprice = None, #current_item_facts['salesPriceNettoDE'].iloc[0],
     current_status = current_item_facts["id.itemStatusCode"].iloc[0],
     incoming_purchases_df=incoming,
     outgoing_demand_df=demand)
@@ -268,7 +265,7 @@ def run_chain_for_item(item_no):
 def forecast_multiple_items_parallel(
     items_list = [],
     max_workers=8,
-    scenario_tag='baseline_noSammelPOs_onlyStatisticalForecasts'
+    scenario_tag=''
     ):
     
     args_list = []
@@ -314,10 +311,7 @@ def push_fc_to_dwh(final_df=None):
         'avg_unit_cost',
         'outgoing_qty',
         'stock_balance',
-        'missed_sales_qty',
-        'stock_balance_value',
-        'productrevenue',
-        'missed_productrevenue'
+        'missed_sales_qty'
     ]
 
     final_df['itemNo'] = final_df['itemNo'].fillna('').astype(str)
@@ -334,7 +328,7 @@ def push_fc_to_dwh(final_df=None):
     insert_query = '''
     INSERT INTO analytics.business_forecast_itemlevel
     (itemNo, week_ending_date, scenario_tag, incoming_qty, avg_unit_cost, outgoing_qty,
-     stock_balance, missed_sales_qty, stock_balance_value, productrevenue, missed_productrevenue)
+     stock_balance, missed_sales_qty)
      VALUES
     '''
     
@@ -386,17 +380,13 @@ def main(
     total = len(items_to_process)
     while idx < total:
         current_subsample = items_to_process[idx:idx + chunksize]
-        #already_processed = check_if_already_procssed(current_subsample, scenario_tag)
-        #current_subsample = [int(item) for item in current_subsample if int(item) not in already_processed]
+        already_processed = check_if_already_procssed(current_subsample, scenario_tag)
+        current_subsample = [int(item) for item in current_subsample if int(item) not in already_processed]
         if not current_subsample:
             idx += chunksize
             continue
 
         df_result = forecast_multiple_items_parallel(current_subsample, scenario_tag=scenario_tag)
-        print(df_result[['week_ending_date', 'incoming_qty', 'avg_unit_cost',
-       'planned_outgoing_qty', 'stock_balance', 'missed_sales_qty',
-       'outgoing_qty', 'productrevenue',
-       'missed_productrevenue']])
         push_fc_to_dwh(df_result)
         idx += chunksize
         left = total - idx
