@@ -1,16 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import os
-import sys
 import warnings
 from datetime import datetime
-from calendar import monthrange
 import numpy as np
 import pandas as pd
 import yaml
 from sqlalchemy import create_engine
-import pickle
 import tqdm
 import clickhouse_driver
 from clickhouse_driver import Client
@@ -76,7 +72,12 @@ def get_demand_fc(item_no):
     weekly_forecast = distribute_monthly_to_weeks(fc, weekly_index)
     weekly_forecast.reset_index(inplace=True)
     weekly_forecast.rename(columns={'index': 'week_ending_date'}, inplace=True)
-    
+
+    # Filter: Only keep weeks >= this week's Sunday
+    today = pd.Timestamp(datetime.today())
+    this_week_end = today + pd.offsets.Week(weekday=6)
+    weekly_forecast = weekly_forecast[weekly_forecast['week_ending_date'] >= this_week_end.normalize()].reset_index(drop=True)
+
     return weekly_forecast
 
 
@@ -148,7 +149,10 @@ def get_incoming_pos(item_no, filterout_sammelpos=False):
         inc_resampled.iloc[0, inc_resampled.columns.get_loc('unitCostThisPurchaseLine')] = overdue_price if not np.isnan(overdue_price) else 0
         
         inc_resampled = inc_resampled.reset_index().rename(columns={'index': 'week_ending_date'})
-        
+    
+    # Filter: Only keep weeks >= this week's Sunday
+    this_week_end = pd.Timestamp(datetime.today()) + pd.offsets.Week(weekday=6)
+    inc_resampled = inc_resampled[inc_resampled['week_ending_date'] >= this_week_end.normalize()].reset_index(drop=True)
     return inc_resampled
         
 def get_item_facts(item_no):
@@ -192,35 +196,46 @@ def build_full_forecast(available_stock,
     
     incoming_summary = incoming_purchases_df.set_index('week_ending_date').rename(columns={'quantityOpen': 'incoming_qty', 'unitCostThisPurchaseLine': 'avg_unit_cost'}).copy()
 
-    outgoing_qty = outgoing_demand_df.set_index('week_ending_date')[['forecasted_demand_adjusted']].rename(columns={'forecasted_demand_adjusted': 'outgoing_qty'}).copy()
+    outgoing_qty = outgoing_demand_df.set_index('week_ending_date')[['forecasted_demand_adjusted']].rename(columns={'forecasted_demand_adjusted': 'planned_outgoing_qty'}).copy()
 
     # Combine all months covering incoming and outgoing
     stock_df = pd.merge(incoming_summary, outgoing_qty, left_index=True, right_index=True, how='outer').fillna(0)
     stock_df = stock_df.sort_index().reset_index()
 
+    # Filter: Only keep weeks >= this week's Sunday
+    this_week_end = pd.Timestamp(datetime.today()) + pd.offsets.Week(weekday=6)
+    stock_df = stock_df[stock_df['week_ending_date'] >= this_week_end.normalize()].reset_index(drop=True)
+
     stock_balance = available_stock
     stock_balances = []
     lost_sales_qty = []
+    fulfilled_demands = []
 
     for idx, row in stock_df.iterrows():
         stock_balance += row['incoming_qty']
 
         # Fulfill demand only up to available stock
-        fulfilled_demand = min(row['outgoing_qty'], stock_balance)
+        fulfilled_demand = min(row['planned_outgoing_qty'], stock_balance)
         stock_balance -= fulfilled_demand
 
         # Lost sales = demand not fulfilled due to insufficient stock
-        lost_qty = row['outgoing_qty'] - fulfilled_demand
-        lost_sales_qty.append(lost_qty)
+        lost_qty = row['planned_outgoing_qty'] - fulfilled_demand
 
+        #print(f"Week ending {row['week_ending_date']}: ")
+        #print(f"  Incoming: {row['incoming_qty']}, Planned outgoing: {row['planned_outgoing_qty']}, ")
+        #print(f"  Stock balance after: {stock_balance}, Fulfilled demand: {fulfilled_demand}, Lost sales: {lost_qty}")
+
+        lost_sales_qty.append(lost_qty)
         stock_balances.append(stock_balance)
+        fulfilled_demands.append(fulfilled_demand)
 
     stock_df['stock_balance'] = stock_balances
     stock_df['missed_sales_qty'] = lost_sales_qty
+    stock_df['outgoing_qty'] = fulfilled_demands  # outgoing_qty is now what could actually be fulfilled
 
     if current_status is not None:
         # check if we actually miss a productrevenue (i.e. by not having the product in stock), this is only true for active items
-        if current_status != 'AKTIV':
+        if current_status == 'AUSLAUF':
             stock_df['missed_sales_qty'] = 0.
 
     stock_df['stock_balance_value'] = stock_df['stock_balance'] * current_unitcost
@@ -231,7 +246,8 @@ def build_full_forecast(available_stock,
 
 def run_chain_for_item(item_no):
     current_item_facts = get_item_facts(item_no)
-    print(current_item_facts)
+    print(current_item_facts["if2.availableStock"])
+    print(current_item_facts["if2.unitCost"])
 
     demand = get_demand_fc(item_no)
     incoming = get_incoming_pos(item_no)
@@ -331,6 +347,7 @@ def check_if_already_procssed(item_nos, scenario_tag):
     """
     if not item_nos:
         return set()
+
     # Convert all item_nos to int for SQL and comparison
     item_nos_int = [int(x) for x in item_nos]
     item_nos_str = ",".join([str(x) for x in item_nos_int])
@@ -376,11 +393,15 @@ def main(
             continue
 
         df_result = forecast_multiple_items_parallel(current_subsample, scenario_tag=scenario_tag)
-        print(df_result)
+        print(df_result[['week_ending_date', 'incoming_qty', 'avg_unit_cost',
+       'planned_outgoing_qty', 'stock_balance', 'missed_sales_qty',
+       'outgoing_qty', 'productrevenue',
+       'missed_productrevenue']])
         push_fc_to_dwh(df_result)
         idx += chunksize
         left = total - idx
-        print(f"{left} items left")
+        if left > 0:
+            print(f"{left} items left")
 
 if __name__ == "__main__":
     app()
