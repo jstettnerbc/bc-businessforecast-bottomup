@@ -115,7 +115,7 @@ def get_incoming_pos(item_no, filterout_sammelpos=False):
         })
     else:
         if filterout_sammelpos:
-            inc = inc[inc['documentNo'].isin(sammel_PO_ids)]
+            inc = inc[~inc['documentNo'].isin(sammel_PO_ids)]
         
         inc['expectedReceiptDate'] = pd.to_datetime(inc['expectedReceiptDate']).dt.normalize()
         inc['week_ending_date'] = inc['expectedReceiptDate'] + pd.offsets.Week(weekday=6)
@@ -149,6 +149,7 @@ def get_incoming_pos(item_no, filterout_sammelpos=False):
         inc_resampled.iloc[0, inc_resampled.columns.get_loc('unitCostThisPurchaseLine')] = overdue_price if not np.isnan(overdue_price) else 0
         
         inc_resampled = inc_resampled.reset_index().rename(columns={'index': 'week_ending_date'})
+        # print(inc_resampled.head(6))
     
     # Filter: Only keep weeks >= this week's Sunday
     this_week_end = pd.Timestamp(datetime.today()) + pd.offsets.Week(weekday=6)
@@ -248,7 +249,7 @@ def run_chain_for_item(item_no):
     current_item_facts = get_item_facts(item_no)
 
     demand = get_demand_fc(item_no)
-    incoming = get_incoming_pos(item_no)
+    incoming = get_incoming_pos(item_no, filterout_sammelpos = True)
     
     fc = build_full_forecast(
     available_stock=current_item_facts["if2.availableStock"].iloc[0],
@@ -387,6 +388,7 @@ def main(
             continue
 
         df_result = forecast_multiple_items_parallel(current_subsample, scenario_tag=scenario_tag)
+        #print(df_result.head(10))
         push_fc_to_dwh(df_result)
         idx += chunksize
         left = total - idx
