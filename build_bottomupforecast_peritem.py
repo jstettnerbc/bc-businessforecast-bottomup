@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import warnings
+import os
 from datetime import datetime
 import numpy as np
 import pandas as pd
@@ -28,10 +29,14 @@ dwh_db_conn2 = clickhouse_driver.dbapi.connect(
     secure=True
 )
 
-def get_demand_fc(item_no):
-    query = f"""select month_startdate, forecasted_demand_adjusted, forecasted_demand_statistical
-              from analytics.diskover_demand_forecast 
-              where bc_item_no = '{item_no}' and month_startdate >= toStartOfMonth(today()) order by month_startdate """
+def get_demand_fc(item_no, scenario_config=None):
+    query = f"""
+
+select month_startdate, forecasted_demand_adjusted, forecasted_demand_statistical, brand
+              from analytics.diskover_demand_forecast fc
+              left join analytics.item_dimensions id on id.itemNo = toString(fc.bc_item_no)
+              where bc_item_no = '{item_no}' and month_startdate >= toStartOfMonth(today()) 
+              order by month_startdate """
     fc = pd.read_sql(query, dwh_db_conn2)
     if fc.empty:
         # Create a date range for 12 months starting from current month
@@ -47,6 +52,14 @@ def get_demand_fc(item_no):
     # Convert month_startdate to datetime and set as index
     fc['month_startdate'] = pd.to_datetime(fc['month_startdate'])
     fc.set_index('month_startdate', inplace=True)
+    
+    # Apply uplift if scenario_config is provided and brand matches
+    if scenario_config is not None and 'brand' in scenario_config and 'uplift_factor' in scenario_config:
+        # Get the brand for this item (from the forecast DataFrame)
+        if not fc.empty and 'brand' in fc.columns:
+            item_brand = fc['brand'].iloc[0]
+            if item_brand == scenario_config['brand']:
+                fc['forecasted_demand_adjusted'] = fc['forecasted_demand_adjusted'] * (1 + float(scenario_config['uplift_factor']))
     
     # Create a date range with weekly frequency covering the full span of data
     weekly_index = pd.date_range(start=fc.index.min(), end=fc.index.max() + pd.offsets.MonthEnd(0), freq='W-SUN')
@@ -77,6 +90,9 @@ def get_demand_fc(item_no):
     today = pd.Timestamp(datetime.today())
     this_week_end = today + pd.offsets.Week(weekday=6)
     weekly_forecast = weekly_forecast[weekly_forecast['week_ending_date'] >= this_week_end.normalize()].reset_index(drop=True)
+
+    print(weekly_forecast)
+    exit()
 
     return weekly_forecast
 
@@ -245,10 +261,10 @@ def build_full_forecast(available_stock,
 
     return stock_df
 
-def run_chain_for_item(item_no):
+def run_chain_for_item(item_no, scenario_config=None):
     current_item_facts = get_item_facts(item_no)
 
-    demand = get_demand_fc(item_no)
+    demand = get_demand_fc(item_no, scenario_config=scenario_config)
     incoming = get_incoming_pos(item_no, filterout_sammelpos = True)
     
     fc = build_full_forecast(
@@ -266,16 +282,19 @@ def run_chain_for_item(item_no):
 def forecast_multiple_items_parallel(
     items_list = [],
     max_workers=8,
-    scenario_tag=''
+    scenario_tag='',
+    scenario_config=None
     ):
-    
     args_list = []
     for item in items_list:
-        args_list.append(item)
+        args_list.append((item, scenario_config))
 
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for res in tqdm.tqdm(executor.map(run_chain_for_item, args_list), total=len(items_list)):
+        for res in tqdm.tqdm(
+            executor.map(lambda args: run_chain_for_item(*args), args_list),
+            total=len(items_list)
+        ):
             results.append(res)
     combined_df = pd.concat(results, ignore_index=True)
     cols = ['itemNo'] + [c for c in combined_df.columns if c != 'itemNo']
@@ -285,13 +304,15 @@ def forecast_multiple_items_parallel(
 
 def get_base_items():
     query = f"""
-        select * from analytics.item_dimensions id 
+        select id.itemNo as itemNo
+        from analytics.item_dimensions id 
         left join analytics.item_facts  if2 on if2.itemNo = id.itemNo
         where masterItem = False AND setItem = False  AND length(itemNo) > 5 AND toInt64OrNull(itemNo) IS NOT NULL 
         AND ( id.itemStatusCode = 'AKTIV' OR (id.itemStatusCode = 'AUSLAUF' AND if2.availableStock > 0) OR (if2.openIncomingQuantity > 0))
-        
         """
-    return pd.read_sql(query, dwh_db_conn2)
+
+    df =  pd.read_sql(query, dwh_db_conn2)
+    return df
 
 dwh_client = Client(
     host=dwh_db_cfg["host"],
@@ -358,11 +379,18 @@ def check_if_already_procssed(item_nos, scenario_tag):
 def main(
         scenario_tag: str = typer.Option('baseline_noSammelPOs_onlyStatisticalForecasts', help="Scenario tag for the forecast"),
         sample_n: int = typer.Option(-1, help="Number of itemNos to process"),
-        single_item_no: str = typer.Option(None, help="Single itemNo to process (overrides sample_n)")
+        single_item_no: str = typer.Option(None, help="Single itemNo to process (overrides sample_n)"),
+        scenario_config: str = typer.Option(None, help="Path to scenario uplift YAML config")
         ):
     """
     Run bottom-up business forecast for a sample of items.
     """
+    # Load config if provided
+    config_data = None
+    if scenario_config is not None:
+        with open(scenario_config, "r") as f:
+            config_data = yaml.safe_load(f)
+
     all_items = get_base_items()
     print("Found {} items to process".format(len(all_items)))
     if single_item_no is not None:
@@ -371,6 +399,7 @@ def main(
         items_to_process = all_items.sample(sample_n)
     else:
         items_to_process = all_items
+    print("äää")
 
     items_to_process = list(items_to_process.itemNo.astype(int).values)
     print("Subsampled to {} items for process".format(len(items_to_process)))
@@ -380,6 +409,8 @@ def main(
     idx = 0
     total = len(items_to_process)
     while idx < total:
+        print("lllll", idx, total)
+
         current_subsample = items_to_process[idx:idx + chunksize]
         already_processed = check_if_already_procssed(current_subsample, scenario_tag)
         current_subsample = [int(item) for item in current_subsample if int(item) not in already_processed]
@@ -387,7 +418,11 @@ def main(
             idx += chunksize
             continue
 
-        df_result = forecast_multiple_items_parallel(current_subsample, scenario_tag=scenario_tag)
+        df_result = forecast_multiple_items_parallel(
+            current_subsample,
+            scenario_tag=scenario_tag,
+            scenario_config=config_data
+        )
         #print(df_result.head(10))
         push_fc_to_dwh(df_result)
         idx += chunksize
