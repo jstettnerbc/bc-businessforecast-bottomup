@@ -62,9 +62,13 @@ select month_startdate, forecasted_demand_adjusted, forecasted_demand_statistica
                     'month_startdate' : dates,
                     'forecasted_demand_adjusted' : manual_demand/12.
                 })
+            else:
+                # Create new empty forecast with zero demand
+                fc = pd.DataFrame()
 
-        else:
+    if fc.empty:
             # Create new empty forecast
+            print("Last fallback, using zero. No demand forecast found for item:", item_no)
             fc = pd.DataFrame({
                 'month_startdate': dates,
                 'forecasted_demand_adjusted': 0
