@@ -112,9 +112,6 @@ select month_startdate, forecasted_demand_adjusted, forecasted_demand_statistica
     this_week_end = today + pd.offsets.Week(weekday=6)
     weekly_forecast = weekly_forecast[weekly_forecast['week_ending_date'] >= this_week_end.normalize()].reset_index(drop=True)
 
-    print(weekly_forecast)
-    exit()
-
     return weekly_forecast
 
 
@@ -329,7 +326,7 @@ def get_base_items():
         from analytics.item_dimensions id 
         left join analytics.item_facts  if2 on if2.itemNo = id.itemNo
         where masterItem = False AND setItem = False  AND length(itemNo) > 5 AND toInt64OrNull(itemNo) IS NOT NULL 
-        AND ( id.itemStatusCode = 'AKTIV' OR (id.itemStatusCode = 'AUSLAUF' AND if2.availableStock > 0) OR (if2.openIncomingQuantity > 0))
+        AND ( id.itemStatusCode = 'AKTIV' OR (id.itemStatusCode = 'AUSLAUF' AND if2.availableStock > 0) OR (if2.openIncomingQuantity > 0)) OR (if2.availableStock > 0)
         """
 
     df =  pd.read_sql(query, dwh_db_conn2)
@@ -424,11 +421,11 @@ def main(
     items_to_process = list(items_to_process.itemNo.astype(int).values)
     print("Subsampled to {} items for process".format(len(items_to_process)))
 
-    chunksize = 200  # Always use 200, but handle shorter lists gracefully
+    chunksize = 4000  # Always use 200, but handle shorter lists gracefully
+
     idx = 0
     total = len(items_to_process)
     while idx < total:
-        print("lllll", idx, total)
 
         current_subsample = items_to_process[idx:idx + chunksize]
         already_processed = check_if_already_procssed(current_subsample, scenario_tag)
