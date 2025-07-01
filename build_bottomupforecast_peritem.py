@@ -330,6 +330,7 @@ def get_base_items():
         """
 
     df =  pd.read_sql(query, dwh_db_conn2)
+    df = df.sample(len(df))
     return df
 
 dwh_client = Client(
