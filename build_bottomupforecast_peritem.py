@@ -54,7 +54,7 @@ select month_startdate, forecasted_demand_adjusted, forecasted_demand_statistica
         dates = pd.date_range(start=start_date, periods=12, freq='MS')  # 'MS' = Month Start
 
         if manual_forecast_df is not None:
-            print("Fallbacking to manual forecast for item:", item_no)
+            # print("Fallbacking to manual forecast for item:", item_no)
             manual_demand = manual_forecast_df[manual_forecast_df['itemNo'] == item_no]
             if not manual_demand.empty:
                 manual_demand = manual_demand.manual_12m_estimate.values[0]
@@ -68,7 +68,7 @@ select month_startdate, forecasted_demand_adjusted, forecasted_demand_statistica
 
     if fc.empty:
             # Create new empty forecast
-            print("Last fallback, using zero. No demand forecast found for item:", item_no)
+            # print("Last fallback, using zero. No demand forecast found for item:", item_no)
             fc = pd.DataFrame({
                 'month_startdate': dates,
                 'forecasted_demand_adjusted': 0
