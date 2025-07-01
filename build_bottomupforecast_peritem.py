@@ -14,6 +14,15 @@ from clickhouse_driver import Client
 import concurrent.futures
 import typer
 
+# Hardcoded path for manual forecast Excel file
+MANUALFORECAST_FILE = "data/20250701_manual_demand_estimates.xlsx"
+
+# Read the Excel file once at module load
+if os.path.exists(MANUALFORECAST_FILE):
+    manual_forecast_df = pd.read_excel(MANUALFORECAST_FILE)
+else:
+    manual_forecast_df = None
+
 from connection_configs import ClickhouseConnectionConfig
 warnings.filterwarnings('ignore')
 
@@ -38,16 +47,28 @@ select month_startdate, forecasted_demand_adjusted, forecasted_demand_statistica
               where bc_item_no = '{item_no}' and month_startdate >= toStartOfMonth(today()) 
               order by month_startdate """
     fc = pd.read_sql(query, dwh_db_conn2)
+
     if fc.empty:
         # Create a date range for 12 months starting from current month
         start_date = pd.Timestamp(datetime.today().strftime('%Y-%m-01'))
         dates = pd.date_range(start=start_date, periods=12, freq='MS')  # 'MS' = Month Start
 
-        # Create new empty forecast 
-        fc = pd.DataFrame({
-            'month_startdate': dates,
-            'forecasted_demand_adjusted': 0
-        })
+        if manual_forecast_df is not None:
+            print("Fallbacking to manual forecast for item:", item_no)
+            manual_demand = manual_forecast_df[manual_forecast_df['itemNo'] == item_no]
+            if not manual_demand.empty:
+                manual_demand = manual_demand.manual_12m_estimate.values[0]
+                fc = pd.DataFrame({
+                    'month_startdate' : dates,
+                    'forecasted_demand_adjusted' : manual_demand/12.
+                })
+
+        else:
+            # Create new empty forecast
+            fc = pd.DataFrame({
+                'month_startdate': dates,
+                'forecasted_demand_adjusted': 0
+            })
 
     # Convert month_startdate to datetime and set as index
     fc['month_startdate'] = pd.to_datetime(fc['month_startdate'])
@@ -399,13 +420,11 @@ def main(
         items_to_process = all_items.sample(sample_n)
     else:
         items_to_process = all_items
-    print("äää")
 
     items_to_process = list(items_to_process.itemNo.astype(int).values)
     print("Subsampled to {} items for process".format(len(items_to_process)))
 
     chunksize = 200  # Always use 200, but handle shorter lists gracefully
-
     idx = 0
     total = len(items_to_process)
     while idx < total:
