@@ -225,77 +225,81 @@ msp.mean_salesprice
 
     return facts
 
-
-def build_full_forecast(available_stock,
-                        current_unitcost, 
-                        current_netprice, 
-                        current_status,
-                        incoming_purchases_df,
-                        outgoing_demand_df):
-    
-    incoming_summary = incoming_purchases_df.set_index('week_ending_date').rename(columns={'quantityOpen': 'incoming_qty', 'unitCostThisPurchaseLine': 'avg_unit_cost'}).copy()
-
-    outgoing_qty = outgoing_demand_df.set_index('week_ending_date')[['forecasted_demand_adjusted']].rename(columns={'forecasted_demand_adjusted': 'planned_outgoing_qty'}).copy()
-
-    # Combine all months covering incoming and outgoing
-    stock_df = pd.merge(incoming_summary, outgoing_qty, left_index=True, right_index=True, how='outer').fillna(0)
-    stock_df = stock_df.sort_index().reset_index()
-
-    # Filter: Only keep weeks >= this week's Sunday
-    this_week_end = pd.Timestamp(datetime.today()) + pd.offsets.Week(weekday=6)
-    stock_df = stock_df[stock_df['week_ending_date'] >= this_week_end.normalize()].reset_index(drop=True)
-
+def _calculate_stock_measures(stock_df, available_stock):
+    """
+    Efficiently calculate stock_balance, fulfilled_demand, and lost_qty for each row.
+    Returns three lists: stock_balances, lost_sales_qty, fulfilled_demands.
+    """
     stock_balance = available_stock
     stock_balances = []
     lost_sales_qty = []
     fulfilled_demands = []
 
-    for idx, row in stock_df.iterrows():
-        stock_balance += row['incoming_qty']
-
-        # Fulfill demand only up to available stock
-        fulfilled_demand = min(row['planned_outgoing_qty'], stock_balance)
+    for row in stock_df.itertuples(index=False):
+        stock_balance += row.incoming_qty
+        fulfilled_demand = min(row.planned_outgoing_qty, stock_balance)
         stock_balance -= fulfilled_demand
-
-        # Lost sales = demand not fulfilled due to insufficient stock
-        lost_qty = row['planned_outgoing_qty'] - fulfilled_demand
-
-        #print(f"Week ending {row['week_ending_date']}: ")
-        #print(f"  Incoming: {row['incoming_qty']}, Planned outgoing: {row['planned_outgoing_qty']}, ")
-        #print(f"  Stock balance after: {stock_balance}, Fulfilled demand: {fulfilled_demand}, Lost sales: {lost_qty}")
+        lost_qty = row.planned_outgoing_qty - fulfilled_demand
 
         lost_sales_qty.append(lost_qty)
         stock_balances.append(stock_balance)
         fulfilled_demands.append(fulfilled_demand)
 
+    return stock_balances, lost_sales_qty, fulfilled_demands
+
+def build_full_forecast(
+    available_stock,
+    current_unitcost, 
+    current_netprice, 
+    current_status,
+    incoming_purchases_df,
+    outgoing_demand_df,
+    realize_potential_factor=0.0
+):
+    incoming_summary = incoming_purchases_df.set_index('week_ending_date').rename(columns={'quantityOpen': 'incoming_qty', 'unitCostThisPurchaseLine': 'avg_unit_cost'}).copy()
+    outgoing_qty = outgoing_demand_df.set_index('week_ending_date')[['forecasted_demand_adjusted']].rename(columns={'forecasted_demand_adjusted': 'planned_outgoing_qty'}).copy()
+    stock_df = pd.merge(incoming_summary, outgoing_qty, left_index=True, right_index=True, how='outer').fillna(0)
+    stock_df = stock_df.sort_index().reset_index()
+    this_week_end = pd.Timestamp(datetime.today()) + pd.offsets.Week(weekday=6)
+    stock_df = stock_df[stock_df['week_ending_date'] >= this_week_end.normalize()].reset_index(drop=True)
+
+    # Initial calculation
+    stock_balances, lost_sales_qty, fulfilled_demands = _calculate_stock_measures(stock_df, available_stock)
     stock_df['stock_balance'] = stock_balances
     stock_df['missed_sales_qty'] = lost_sales_qty
-    stock_df['outgoing_qty'] = fulfilled_demands  # outgoing_qty is now what could actually be fulfilled
+    stock_df['outgoing_qty'] = fulfilled_demands
 
     if current_status is not None:
-        # check if we actually miss a productrevenue (i.e. by not having the product in stock), this is only true for active items
         if current_status == 'AUSLAUF':
             stock_df['missed_sales_qty'] = 0.
 
-    #stock_df['stock_balance_value'] = stock_df['stock_balance'] * current_unitcost
-    #stock_df['productrevenue'] = stock_df['outgoing_qty'] * current_netprice
-    #stock_df['missed_productrevenue'] = stock_df['missed_sales_qty'] * current_netprice
+
+    # Realize potential missed sales as additional incoming qty, then recalculate
+    if realize_potential_factor > 0:
+        stock_df['incoming_qty'] = stock_df['incoming_qty'] + stock_df['missed_sales_qty'] * realize_potential_factor
+        stock_balances, lost_sales_qty, fulfilled_demands = _calculate_stock_measures(stock_df, available_stock)
+        stock_df['stock_balance'] = stock_balances
+        stock_df['missed_sales_qty'] = lost_sales_qty
+        stock_df['outgoing_qty'] = fulfilled_demands
+
 
     return stock_df
 
-def run_chain_for_item(item_no, scenario_config=None):
+def run_chain_for_item(item_no, scenario_config=None, realize_potential_factor=0.0):
     current_item_facts = get_item_facts(item_no)
 
     demand = get_demand_fc(item_no, scenario_config=scenario_config)
     incoming = get_incoming_pos(item_no, filterout_sammelpos = True)
     
     fc = build_full_forecast(
-    available_stock=current_item_facts["if2.availableStock"].iloc[0],
-    current_unitcost = None, #current_item_facts["if2.unitCost"].iloc[0],
-    current_netprice = None, #current_item_facts['salesPriceNettoDE'].iloc[0],
-    current_status = current_item_facts["id.itemStatusCode"].iloc[0],
-    incoming_purchases_df=incoming,
-    outgoing_demand_df=demand)
+        available_stock=current_item_facts["if2.availableStock"].iloc[0],
+        current_unitcost = None, #current_item_facts["if2.unitCost"].iloc[0],
+        current_netprice = None, #current_item_facts['salesPriceNettoDE'].iloc[0],
+        current_status = current_item_facts["id.itemStatusCode"].iloc[0],
+        incoming_purchases_df=incoming,
+        outgoing_demand_df=demand,
+        realize_potential_factor=realize_potential_factor
+    )
     
     fc['itemNo'] = item_no
     return fc
@@ -305,11 +309,12 @@ def forecast_multiple_items_parallel(
     items_list = [],
     max_workers=8,
     scenario_tag='',
-    scenario_config=None
+    scenario_config=None,
+    realize_potential_factor=0.0
     ):
     args_list = []
     for item in items_list:
-        args_list.append((item, scenario_config))
+        args_list.append((item, scenario_config, realize_potential_factor))
 
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -370,12 +375,12 @@ def push_fc_to_dwh(final_df=None):
     
     
     # Prepare INSERT query (note: do not use 'VALUES' here)
-    insert_query = '''
+    insert_query = """
     INSERT INTO analytics.business_forecast_itemlevel
     (itemNo, week_ending_date, scenario_tag, incoming_qty, avg_unit_cost, outgoing_qty,
      stock_balance, missed_sales_qty)
      VALUES
-    '''
+     """
     
     # Execute the insert with data
     dwh_client.execute(insert_query, records)
@@ -403,11 +408,13 @@ def main(
         scenario_tag: str = typer.Option('baseline_noSammelPOs_onlyStatisticalForecasts', help="Scenario tag for the forecast"),
         sample_n: int = typer.Option(-1, help="Number of itemNos to process"),
         single_item_no: str = typer.Option(None, help="Single itemNo to process (overrides sample_n)"),
-        scenario_config: str = typer.Option(None, help="Path to scenario uplift YAML config")
+        scenario_config: str = typer.Option(None, help="Path to scenario uplift YAML config"),
+        realize_potential_factor: float = typer.Option(0.0, help="Fraction [0-1] of missed sales to realize as additional incoming qty")
         ):
     """
     Run bottom-up business forecast for a sample of items.
     """
+
     # Load config if provided
     config_data = None
     if scenario_config is not None:
@@ -433,8 +440,8 @@ def main(
     while idx < total:
 
         current_subsample = items_to_process[idx:idx + chunksize]
-        already_processed = check_if_already_procssed(current_subsample, scenario_tag)
-        current_subsample = [int(item) for item in current_subsample if int(item) not in already_processed]
+        #already_processed = check_if_already_procssed(current_subsample, scenario_tag)
+        #current_subsample = [int(item) for item in current_subsample if int(item) not in already_processed]
         if not current_subsample:
             idx += chunksize
             continue
@@ -442,9 +449,10 @@ def main(
         df_result = forecast_multiple_items_parallel(
             current_subsample,
             scenario_tag=scenario_tag,
-            scenario_config=config_data
+            scenario_config=config_data,
+            realize_potential_factor=realize_potential_factor
         )
-        #print(df_result.head(10))
+
         push_fc_to_dwh(df_result)
         idx += chunksize
         left = total - idx
