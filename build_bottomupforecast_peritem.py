@@ -48,12 +48,25 @@ dwh_db_conn2 = clickhouse_driver.dbapi.connect(
     secure=True
 )
 
-def get_demand_fc(item_no, scenario_config=None):
-    query = f"""
 
-select month_startdate, forecasted_demand_adjusted, forecasted_demand_statistical, brand
+def get_base_info_per_item(item_no):
+    """
+    Fetches base information for a given item number from the item_dimensions table.
+    Returns a DataFrame with the item's details.
+    """
+    item_no = str(item_no).strip()
+    query = """ select brand, wareGroupLevel0, wareGroupLevel1, webshop_isListedOnline,  firstDateOnlineListed, salesStartingDate from  analytics.item_dimensions id
+                where itemNo = '{item_no}'
+            """
+    return pd.read_sql(query.format(item_no=item_no), dwh_db_conn2)
+
+
+def get_demand_fc(item_no, scenario_config=None, newbie_salesstart_offset=None):
+    item_info = get_base_info_per_item(item_no)
+
+    query = f"""
+    select month_startdate, forecasted_demand_adjusted, forecasted_demand_statistical
               from analytics.diskover_demand_forecast fc
-              left join analytics.item_dimensions id on id.itemNo = toString(fc.bc_item_no)
               where bc_item_no = '{item_no}' and month_startdate >= toStartOfMonth(today()) 
               order by month_startdate """
     fc = pd.read_sql(query, dwh_db_conn2)
@@ -92,7 +105,7 @@ select month_startdate, forecasted_demand_adjusted, forecasted_demand_statistica
     if scenario_config is not None and 'brand' in scenario_config and 'uplift_factor' in scenario_config:
         # Get the brand for this item (from the forecast DataFrame)
         if not fc.empty and 'brand' in fc.columns:
-            item_brand = fc['brand'].iloc[0]
+            item_brand = item_info['brand'].iloc[0]
             if item_brand == scenario_config['brand']:
                 fc['forecasted_demand_adjusted'] = fc['forecasted_demand_adjusted'] * (1 + float(scenario_config['uplift_factor']))
     
@@ -125,6 +138,20 @@ select month_startdate, forecasted_demand_adjusted, forecasted_demand_statistica
     today = pd.Timestamp(datetime.today())
     this_week_end = today + pd.offsets.Week(weekday=6)
     weekly_forecast = weekly_forecast[weekly_forecast['week_ending_date'] >= this_week_end.normalize()].reset_index(drop=True)
+
+    # DATABI-506: apply offset for newbie articles, i.e. shift their starting date on the demand side
+    sales_start_date = pd.to_datetime(item_info['salesStartingDate'].iloc[0])
+    webshop_is_listed = bool(item_info['webshop_isListedOnline'].iloc[0])
+    if (
+        webshop_is_listed == False
+        and sales_start_date > today - pd.Timedelta(days=180)
+    ):
+        # If the item is not listed online AND has a reasonable salesStartingDate, we null the demand for the first weeks
+        if not weekly_forecast.empty:
+            weekly_forecast.loc[
+                weekly_forecast['week_ending_date'] < (sales_start_date + pd.Timedelta(days=newbie_salesstart_offset)),
+                'forecasted_demand_adjusted'
+            ] = 0
 
     return weekly_forecast
 
@@ -295,10 +322,10 @@ def build_full_forecast(
 
     return stock_df
 
-def run_chain_for_item(item_no, scenario_config=None, realize_potential_factor=0.0):
+def run_chain_for_item(item_no, scenario_config=None, realize_potential_factor=0.0, newbie_salesstart_offset=None):
     current_item_facts = get_item_facts(item_no)
 
-    demand = get_demand_fc(item_no, scenario_config=scenario_config)
+    demand = get_demand_fc(item_no, scenario_config=scenario_config, newbie_salesstart_offset=newbie_salesstart_offset)
     incoming = get_incoming_pos(item_no, filterout_sammelpos = True)
     
     fc = build_full_forecast(
@@ -320,11 +347,12 @@ def forecast_multiple_items_parallel(
     max_workers=8,
     scenario_tag='',
     scenario_config=None,
-    realize_potential_factor=0.0
+    realize_potential_factor=0.0,
+    newbie_salesstart_offset=None
     ):
     args_list = []
     for item in items_list:
-        args_list.append((item, scenario_config, realize_potential_factor))
+        args_list.append((item, scenario_config, realize_potential_factor, newbie_salesstart_offset))
 
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -419,7 +447,8 @@ def main(
         sample_n: int = typer.Option(-1, help="Number of itemNos to process"),
         single_item_no: str = typer.Option(None, help="Single itemNo to process (overrides sample_n)"),
         scenario_config: str = typer.Option(None, help="Path to scenario uplift YAML config"),
-        realize_potential_factor: float = typer.Option(0.0, help="Fraction [0-1] of missed sales to realize as additional incoming qty")
+        realize_potential_factor: float = typer.Option(0.0, help="Fraction [0-1] of missed sales to realize as additional incoming qty"),
+        newbie_salesstart_offset: int = typer.Option(0, help="Offset in days for newbie sales start (null demand for first N days after sales start)")
         ):
     """
     Run bottom-up business forecast for a sample of items.
@@ -460,7 +489,8 @@ def main(
             current_subsample,
             scenario_tag=scenario_tag,
             scenario_config=config_data,
-            realize_potential_factor=realize_potential_factor
+            realize_potential_factor=realize_potential_factor,
+            newbie_salesstart_offset=newbie_salesstart_offset
         )
 
         push_fc_to_dwh(df_result)
