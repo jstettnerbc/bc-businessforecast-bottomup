@@ -14,14 +14,24 @@ from clickhouse_driver import Client
 import concurrent.futures
 import typer
 
-# Hardcoded path for manual forecast Excel file
-MANUALFORECAST_FILE = "data/20250701_manual_demand_estimates.xlsx"
+# Hardcoded path for manual forecast Excel files
+MANUALFORECAST_FILES = ["data/20250701_manual_demand_estimates.xlsx", "data/250702_N-Artikel_Round_2.xlsx"]
 
-# Read the Excel file once at module load
-if os.path.exists(MANUALFORECAST_FILE):
-    manual_forecast_df = pd.read_excel(MANUALFORECAST_FILE)
+# Read all Excel files and concatenate them into a single DataFrame
+manual_forecast_dfs = []
+for file_path in MANUALFORECAST_FILES:
+    if os.path.exists(file_path):
+        try:
+            df = pd.read_excel(file_path)
+            manual_forecast_dfs.append(df)
+        except Exception as e:
+            print(f"Warning: Could not read {file_path}: {e}")
+
+if manual_forecast_dfs:
+    manual_forecast_df = pd.concat(manual_forecast_dfs, ignore_index=True)
 else:
     manual_forecast_df = None
+
 
 from connection_configs import ClickhouseConnectionConfig
 warnings.filterwarnings('ignore')
