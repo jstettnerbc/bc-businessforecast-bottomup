@@ -170,67 +170,118 @@ sammel_PO_ids = [
 ]
 
 
-def get_incoming_pos(item_no, filterout_sammelpos=False):
+def get_incoming_pos(item_no, filterout_sammelpos=False, add_overdue_pos=True, sample_strongly_overdue=True) :
     query = f"""
         select documentNo, orderStatus, itemNo, quantityOrdered-quantityReceived as quantityOpen, unitCostThisPurchaseLine, expectedReceiptDate
         from reporting.open_purchaseorder_lines where itemNo = '{item_no}' and expectedReceiptDate < '2030-01-01' order by expectedReceiptDate"""
-    
+
     inc = pd.read_sql(query, dwh_db_conn2)
-    
-    if inc.empty:
+
+    if inc.empty :
         # Create a weekly date range for 16 months (~69 weeks) starting from current week ending Sunday
         start_date = pd.Timestamp(datetime.today())
         start_week_end = start_date + pd.offsets.Week(weekday=6)  # Sunday
         periods = 53  # about 24 months in weeks
         dates = pd.date_range(start=start_week_end.normalize(), periods=periods, freq='W-SUN')
         inc_resampled = pd.DataFrame({
-            'week_ending_date': dates,
-            'quantityOpen': 0,
-            'unitCostThisPurchaseLine': 0
+            'week_ending_date' : dates,
+            'quantityOpen' : 0,
+            'unitCostThisPurchaseLine' : 0
         })
-    else:
-        if filterout_sammelpos:
+    else :
+        if filterout_sammelpos :
             inc = inc[~inc['documentNo'].isin(sammel_PO_ids)]
-        
+
         inc['expectedReceiptDate'] = pd.to_datetime(inc['expectedReceiptDate']).dt.normalize()
         inc['week_ending_date'] = inc['expectedReceiptDate'] + pd.offsets.Week(weekday=6)
         inc['week_ending_date'] = inc['week_ending_date'].dt.normalize()  # remove time part and milliseconds
-        
-        inc_resampled = inc.groupby('week_ending_date').agg({
-            'quantityOpen': 'sum',
-            'unitCostThisPurchaseLine': 'mean'
+
+        today = pd.Timestamp(datetime.today()).normalize()
+        this_week_end = today + pd.offsets.Week(weekday=6)
+
+        # Masks for overdue types
+        split_overdue_and_strongly_overdue = 20
+        strongly_overdue_mask = inc['expectedReceiptDate'] < (today - pd.Timedelta(days=split_overdue_and_strongly_overdue))
+        overdue_mask = (inc['expectedReceiptDate'] < today) & (
+                inc['expectedReceiptDate'] >= (today - pd.Timedelta(days=split_overdue_and_strongly_overdue)))
+        not_overdue_mask = ~(strongly_overdue_mask | overdue_mask)
+
+        strongly_overdue = inc[strongly_overdue_mask]
+        overdue = inc[overdue_mask]
+        not_overdue = inc[not_overdue_mask]
+
+        # Strongly overdue: sample a random day between today and today+90, assign full qty to that week if flag is set
+        sampled_rows = []
+        if sample_strongly_overdue and not strongly_overdue.empty :
+            rng = np.random.default_rng()
+            for _, row in strongly_overdue.iterrows() :
+                random_offset = rng.integers(0, 91)
+                sampled_date = today + pd.Timedelta(days=int(random_offset))
+                week_ending = (sampled_date + pd.offsets.Week(weekday=6)).normalize()
+                sampled_rows.append({
+                    'week_ending_date' : week_ending,
+                    'quantityOpen' : row['quantityOpen'],
+                    'unitCostThisPurchaseLine' : row['unitCostThisPurchaseLine']
+                })
+        # If not sampling, strongly overdue are ignored
+        sampled_df = pd.DataFrame(sampled_rows)
+        if not sampled_df.empty :
+            sampled_df = sampled_df.groupby('week_ending_date').agg({
+                'quantityOpen' : 'sum',
+                'unitCostThisPurchaseLine' : 'mean'
+            }).reset_index()
+        else :
+            sampled_df = pd.DataFrame(columns=['week_ending_date', 'quantityOpen', 'unitCostThisPurchaseLine'])
+
+        # Overdue but not strongly overdue: sum qty, avg cost, assign to first week if flag is set
+        overdue_rows = []
+        if add_overdue_pos and not overdue.empty :
+            overdue_qty = overdue['quantityOpen'].sum()
+            overdue_cost = overdue['unitCostThisPurchaseLine'].mean()
+            overdue_rows.append({
+                'week_ending_date' : this_week_end.normalize(),
+                'quantityOpen' : overdue_qty,
+                'unitCostThisPurchaseLine' : overdue_cost
+            })
+        overdue_df = pd.DataFrame(overdue_rows)
+
+        # Not overdue: group as before
+        not_overdue_grouped = not_overdue.groupby('week_ending_date').agg({
+            'quantityOpen' : 'sum',
+            'unitCostThisPurchaseLine' : 'mean'
+        }).reset_index()
+
+        # Combine all
+        inc_grouped = pd.concat([sampled_df, overdue_df, not_overdue_grouped], ignore_index=True)
+        inc_grouped = inc_grouped.groupby('week_ending_date').agg({
+            'quantityOpen' : 'sum',
+            'unitCostThisPurchaseLine' : 'mean'
         })
-        
+
         start_date = pd.Timestamp(datetime.today())
         start_week_end = (start_date + pd.offsets.Week(weekday=6)).normalize()
         periods = 53  # 24 months approx in weeks
         full_range = pd.date_range(start=start_week_end, periods=periods, freq='W-SUN')
-        
-        overdue_quantity = inc_resampled.loc[inc_resampled.index < start_week_end, 'quantityOpen'].sum()
-        overdue_price = inc_resampled.loc[inc_resampled.index < start_week_end, 'unitCostThisPurchaseLine'].mean()
-        
-        inc_resampled = inc_resampled.loc[inc_resampled.index >= start_week_end]
-        
-        inc_resampled = inc_resampled.reindex(full_range, fill_value=0)
-        
+
+        inc_resampled = inc_grouped.reindex(full_range, fill_value=0)
+
         # For unitCostThisPurchaseLine, fill with NaN or with previous non-null value if any
-        if inc_resampled['unitCostThisPurchaseLine'].isna().all():
+        if inc_resampled['unitCostThisPurchaseLine'].isna().all() :
             inc_resampled['unitCostThisPurchaseLine'] = 0
-        else:
+        else :
             inc_resampled['unitCostThisPurchaseLine'].fillna(method='ffill', inplace=True)
             inc_resampled['unitCostThisPurchaseLine'].fillna(0, inplace=True)
-        
-        inc_resampled.iloc[0, inc_resampled.columns.get_loc('quantityOpen')] += overdue_quantity
-        inc_resampled.iloc[0, inc_resampled.columns.get_loc('unitCostThisPurchaseLine')] = overdue_price if not np.isnan(overdue_price) else 0
-        
-        inc_resampled = inc_resampled.reset_index().rename(columns={'index': 'week_ending_date'})
-        # print(inc_resampled.head(6))
-    
+
+        inc_resampled = inc_resampled.reset_index().rename(columns={'index' : 'week_ending_date'})
+
     # Filter: Only keep weeks >= this week's Sunday
     this_week_end = pd.Timestamp(datetime.today()) + pd.offsets.Week(weekday=6)
     inc_resampled = inc_resampled[inc_resampled['week_ending_date'] >= this_week_end.normalize()].reset_index(drop=True)
+    print(inc_resampled)
+    exit()
+
     return inc_resampled
-        
+
 def get_item_facts(item_no):
     query = f"""
         with meanSalesprice as (select itemNo, avg(is2.salesAmountActual/is2.quantity) as mean_salesprice from analytics.item_salesanalytics is2
@@ -286,8 +337,8 @@ def _calculate_stock_measures(stock_df, available_stock):
 
 def build_full_forecast(
     available_stock,
-    current_unitcost, 
-    current_netprice, 
+    current_unitcost,
+    current_netprice,
     current_status,
     incoming_purchases_df,
     outgoing_demand_df,
@@ -322,12 +373,24 @@ def build_full_forecast(
 
     return stock_df
 
-def run_chain_for_item(item_no, scenario_config=None, realize_potential_factor=0.0, newbie_salesstart_offset=None):
+def run_chain_for_item(
+    item_no,
+    scenario_config=None,
+    realize_potential_factor=0.0,
+    newbie_salesstart_offset=None,
+    add_overdue_pos=True,
+    sample_strongly_overdue=True
+):
     current_item_facts = get_item_facts(item_no)
 
     demand = get_demand_fc(item_no, scenario_config=scenario_config, newbie_salesstart_offset=newbie_salesstart_offset)
-    incoming = get_incoming_pos(item_no, filterout_sammelpos = True)
-    
+    incoming = get_incoming_pos(
+        item_no,
+        filterout_sammelpos=True,
+        add_overdue_pos=add_overdue_pos,
+        sample_strongly_overdue=sample_strongly_overdue
+    )
+
     fc = build_full_forecast(
         available_stock=current_item_facts["if2.availableStock"].iloc[0],
         current_unitcost = None, #current_item_facts["if2.unitCost"].iloc[0],
@@ -337,7 +400,7 @@ def run_chain_for_item(item_no, scenario_config=None, realize_potential_factor=0
         outgoing_demand_df=demand,
         realize_potential_factor=realize_potential_factor
     )
-    
+
     fc['itemNo'] = item_no
     return fc
 
@@ -348,11 +411,20 @@ def forecast_multiple_items_parallel(
     scenario_tag='',
     scenario_config=None,
     realize_potential_factor=0.0,
-    newbie_salesstart_offset=None
+    newbie_salesstart_offset=None,
+    add_overdue_pos=True,
+    sample_strongly_overdue=True
     ):
     args_list = []
     for item in items_list:
-        args_list.append((item, scenario_config, realize_potential_factor, newbie_salesstart_offset))
+        args_list.append((
+            item,
+            scenario_config,
+            realize_potential_factor,
+            newbie_salesstart_offset,
+            add_overdue_pos,
+            sample_strongly_overdue
+        ))
 
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -407,11 +479,11 @@ def push_fc_to_dwh(final_df=None):
 
     final_df = final_df[expected_columns].copy()
     final_df['week_ending_date'] = pd.to_datetime(final_df['week_ending_date'])
-        
+
     # Convert DataFrame rows to list of tuples for insertion
     records = [tuple(row) for row in final_df.itertuples(index=False, name=None)]
-    
-    
+
+
     # Prepare INSERT query (note: do not use 'VALUES' here)
     insert_query = """
     INSERT INTO analytics.business_forecast_itemlevel
@@ -419,7 +491,7 @@ def push_fc_to_dwh(final_df=None):
      stock_balance, missed_sales_qty)
      VALUES
      """
-    
+
     # Execute the insert with data
     dwh_client.execute(insert_query, records)
 
@@ -448,7 +520,9 @@ def main(
         single_item_no: str = typer.Option(None, help="Single itemNo to process (overrides sample_n)"),
         scenario_config: str = typer.Option(None, help="Path to scenario uplift YAML config"),
         realize_potential_factor: float = typer.Option(0.0, help="Fraction [0-1] of missed sales to realize as additional incoming qty"),
-        newbie_salesstart_offset: int = typer.Option(0, help="Offset in days for newbie sales start (null demand for first N days after sales start)")
+        newbie_salesstart_offset: int = typer.Option(0., help="Offset in days for newbie sales start (null demand for first N days after sales start)"),
+        add_overdue_pos: bool = typer.Option(True, help="Add overdue PO quantities to first week"),
+        sample_strongly_overdue_pos: bool = typer.Option(True, help="Sample strongly overdue POs between today and today+90, otherwise ignore")
         ):
     """
     Run bottom-up business forecast for a sample of items.
@@ -490,7 +564,9 @@ def main(
             scenario_tag=scenario_tag,
             scenario_config=config_data,
             realize_potential_factor=realize_potential_factor,
-            newbie_salesstart_offset=newbie_salesstart_offset
+            newbie_salesstart_offset=newbie_salesstart_offset,
+            add_overdue_pos=add_overdue_pos,
+            sample_strongly_overdue=sample_strongly_overdue_pos
         )
 
         push_fc_to_dwh(df_result)
