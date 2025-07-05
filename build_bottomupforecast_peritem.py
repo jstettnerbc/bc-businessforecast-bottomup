@@ -140,18 +140,19 @@ def get_demand_fc(item_no, scenario_config=None, newbie_salesstart_offset=None):
     weekly_forecast = weekly_forecast[weekly_forecast['week_ending_date'] >= this_week_end.normalize()].reset_index(drop=True)
 
     # DATABI-506: apply offset for newbie articles, i.e. shift their starting date on the demand side
-    sales_start_date = pd.to_datetime(item_info['salesStartingDate'].iloc[0])
-    webshop_is_listed = bool(item_info['webshop_isListedOnline'].iloc[0])
-    if (
-        webshop_is_listed == False
-        and sales_start_date > today - pd.Timedelta(days=180)
-    ):
-        # If the item is not listed online AND has a reasonable salesStartingDate, we null the demand for the first weeks
-        if not weekly_forecast.empty:
-            weekly_forecast.loc[
-                weekly_forecast['week_ending_date'] < (sales_start_date + pd.Timedelta(days=newbie_salesstart_offset)),
-                'forecasted_demand_adjusted'
-            ] = 0
+    if not item_info.empty:
+        sales_start_date = pd.to_datetime(item_info['salesStartingDate'].iloc[0])
+        webshop_is_listed = bool(item_info['webshop_isListedOnline'].iloc[0])
+        if (
+            webshop_is_listed == False
+            and sales_start_date > today - pd.Timedelta(days=180)
+        ):
+            # If the item is not listed online AND has a reasonable salesStartingDate, we null the demand for the first weeks
+            if not weekly_forecast.empty:
+                weekly_forecast.loc[
+                    weekly_forecast['week_ending_date'] < (sales_start_date + pd.Timedelta(days=newbie_salesstart_offset)),
+                    'forecasted_demand_adjusted'
+                ] = 0
 
     return weekly_forecast
 
