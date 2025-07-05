@@ -170,7 +170,7 @@ sammel_PO_ids = [
 ]
 
 
-def get_incoming_pos(item_no, filterout_sammelpos=False, add_overdue_pos=True, sample_strongly_overdue=True) :
+def get_incoming_pos(item_no, filterout_sammelpos=False, add_overdue_pos=True, sample_strongly_overdue=True, decrease_factor_strongly_overdue_pos=None) :
     query = f"""
         select documentNo, orderStatus, itemNo, quantityOrdered-quantityReceived as quantityOpen, unitCostThisPurchaseLine, expectedReceiptDate
         from reporting.open_purchaseorder_lines where itemNo = '{item_no}' and expectedReceiptDate < '2030-01-01' order by expectedReceiptDate"""
@@ -200,7 +200,7 @@ def get_incoming_pos(item_no, filterout_sammelpos=False, add_overdue_pos=True, s
         this_week_end = today + pd.offsets.Week(weekday=6)
 
         # Masks for overdue types
-        split_overdue_and_strongly_overdue = 20
+        split_overdue_and_strongly_overdue = 14
         strongly_overdue_mask = inc['expectedReceiptDate'] < (today - pd.Timedelta(days=split_overdue_and_strongly_overdue))
         overdue_mask = (inc['expectedReceiptDate'] < today) & (
                 inc['expectedReceiptDate'] >= (today - pd.Timedelta(days=split_overdue_and_strongly_overdue)))
@@ -218,9 +218,12 @@ def get_incoming_pos(item_no, filterout_sammelpos=False, add_overdue_pos=True, s
                 random_offset = rng.integers(0, 91)
                 sampled_date = today + pd.Timedelta(days=int(random_offset))
                 week_ending = (sampled_date + pd.offsets.Week(weekday=6)).normalize()
+                qty = row['quantityOpen']
+                if decrease_factor_strongly_overdue_pos is not None:
+                    qty = qty * float(decrease_factor_strongly_overdue_pos)
                 sampled_rows.append({
                     'week_ending_date' : week_ending,
-                    'quantityOpen' : row['quantityOpen'],
+                    'quantityOpen' : qty,
                     'unitCostThisPurchaseLine' : row['unitCostThisPurchaseLine']
                 })
         # If not sampling, strongly overdue are ignored
@@ -277,8 +280,6 @@ def get_incoming_pos(item_no, filterout_sammelpos=False, add_overdue_pos=True, s
     # Filter: Only keep weeks >= this week's Sunday
     this_week_end = pd.Timestamp(datetime.today()) + pd.offsets.Week(weekday=6)
     inc_resampled = inc_resampled[inc_resampled['week_ending_date'] >= this_week_end.normalize()].reset_index(drop=True)
-    print(inc_resampled)
-    exit()
 
     return inc_resampled
 
@@ -379,7 +380,8 @@ def run_chain_for_item(
     realize_potential_factor=0.0,
     newbie_salesstart_offset=None,
     add_overdue_pos=True,
-    sample_strongly_overdue=True
+    sample_strongly_overdue=True,
+    decrease_factor_strongly_overdue_pos=None
 ):
     current_item_facts = get_item_facts(item_no)
 
@@ -388,7 +390,8 @@ def run_chain_for_item(
         item_no,
         filterout_sammelpos=True,
         add_overdue_pos=add_overdue_pos,
-        sample_strongly_overdue=sample_strongly_overdue
+        sample_strongly_overdue=sample_strongly_overdue,
+        decrease_factor_strongly_overdue_pos=decrease_factor_strongly_overdue_pos
     )
 
     fc = build_full_forecast(
@@ -413,7 +416,8 @@ def forecast_multiple_items_parallel(
     realize_potential_factor=0.0,
     newbie_salesstart_offset=None,
     add_overdue_pos=True,
-    sample_strongly_overdue=True
+    sample_strongly_overdue=True,
+    decrease_factor_strongly_overdue_pos=None
     ):
     args_list = []
     for item in items_list:
@@ -423,7 +427,8 @@ def forecast_multiple_items_parallel(
             realize_potential_factor,
             newbie_salesstart_offset,
             add_overdue_pos,
-            sample_strongly_overdue
+            sample_strongly_overdue,
+            decrease_factor_strongly_overdue_pos
         ))
 
     results = []
@@ -522,7 +527,8 @@ def main(
         realize_potential_factor: float = typer.Option(0.0, help="Fraction [0-1] of missed sales to realize as additional incoming qty"),
         newbie_salesstart_offset: int = typer.Option(0., help="Offset in days for newbie sales start (null demand for first N days after sales start)"),
         add_overdue_pos: bool = typer.Option(True, help="Add overdue PO quantities to first week"),
-        sample_strongly_overdue_pos: bool = typer.Option(True, help="Sample strongly overdue POs between today and today+90, otherwise ignore")
+        sample_strongly_overdue_pos: bool = typer.Option(True, help="Sample strongly overdue POs between today and today+90, otherwise ignore"),
+        decrease_factor_strongly_overdue_pos: float = typer.Option(None, help="If set, decrease strongly overdue PO qty by this factor (0-1)")
         ):
     """
     Run bottom-up business forecast for a sample of items.
@@ -566,7 +572,8 @@ def main(
             realize_potential_factor=realize_potential_factor,
             newbie_salesstart_offset=newbie_salesstart_offset,
             add_overdue_pos=add_overdue_pos,
-            sample_strongly_overdue=sample_strongly_overdue_pos
+            sample_strongly_overdue=sample_strongly_overdue_pos,
+            decrease_factor_strongly_overdue_pos=decrease_factor_strongly_overdue_pos
         )
 
         push_fc_to_dwh(df_result)
