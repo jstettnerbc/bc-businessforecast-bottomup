@@ -61,7 +61,7 @@ def get_base_info_per_item(item_no):
     return pd.read_sql(query.format(item_no=item_no), dwh_db_conn2)
 
 
-def get_demand_fc(item_no, scenario_config=None, newbie_salesstart_offset=None):
+def get_demand_fc(item_no, scenario_config=None, newbie_salesstart_offset=None, decrease_demand_factor=None):
     item_info = get_base_info_per_item(item_no)
 
     query = f"""
@@ -153,6 +153,10 @@ def get_demand_fc(item_no, scenario_config=None, newbie_salesstart_offset=None):
                     weekly_forecast['week_ending_date'] < (sales_start_date + pd.Timedelta(days=newbie_salesstart_offset)),
                     'forecasted_demand_adjusted'
                 ] = 0
+
+    # Apply decrease_demand_factor if set
+    if decrease_demand_factor is not None:
+        weekly_forecast['forecasted_demand_adjusted'] = weekly_forecast['forecasted_demand_adjusted'] * float(decrease_demand_factor)
 
     return weekly_forecast
 
@@ -385,11 +389,17 @@ def run_chain_for_item(
     add_overdue_pos=True,
     sample_strongly_overdue=True,
     decrease_factor_strongly_overdue_pos=None,
-    decrease_factor_mildly_overdue_pos=None
+    decrease_factor_mildly_overdue_pos=None,
+    decrease_demand_factor=None
 ):
     current_item_facts = get_item_facts(item_no)
 
-    demand = get_demand_fc(item_no, scenario_config=scenario_config, newbie_salesstart_offset=newbie_salesstart_offset)
+    demand = get_demand_fc(
+        item_no,
+        scenario_config=scenario_config,
+        newbie_salesstart_offset=newbie_salesstart_offset,
+        decrease_demand_factor=decrease_demand_factor
+    )
     incoming = get_incoming_pos(
         item_no,
         filterout_sammelpos=True,
@@ -423,7 +433,8 @@ def forecast_multiple_items_parallel(
     add_overdue_pos=True,
     sample_strongly_overdue=True,
     decrease_factor_strongly_overdue_pos=None,
-    decrease_factor_mildly_overdue_pos=None
+    decrease_factor_mildly_overdue_pos=None,
+    decrease_demand_factor=None
     ):
     args_list = []
     for item in items_list:
@@ -435,7 +446,8 @@ def forecast_multiple_items_parallel(
             add_overdue_pos,
             sample_strongly_overdue,
             decrease_factor_strongly_overdue_pos,
-            decrease_factor_mildly_overdue_pos
+            decrease_factor_mildly_overdue_pos,
+            decrease_demand_factor
         ))
 
     results = []
@@ -449,6 +461,7 @@ def forecast_multiple_items_parallel(
     cols = ['itemNo'] + [c for c in combined_df.columns if c != 'itemNo']
     combined_df = combined_df[cols]
     combined_df['scenario_tag'] = scenario_tag
+    print(combined_df)
     return combined_df
 
 def get_base_items():
@@ -536,7 +549,8 @@ def main(
         add_overdue_pos: bool = typer.Option(True, help="Add overdue PO quantities to first week"),
         sample_strongly_overdue_pos: bool = typer.Option(True, help="Sample strongly overdue POs between today and today+90, otherwise ignore"),
         decrease_factor_strongly_overdue_pos: float = typer.Option(None, help="If set, decrease strongly overdue PO qty by this factor (0-1)"),
-        decrease_factor_mildly_overdue_pos: float = typer.Option(None, help="If set, decrease mildly overdue PO qty by this factor (0-1)")
+        decrease_factor_mildly_overdue_pos: float = typer.Option(None, help="If set, decrease mildly overdue PO qty by this factor (0-1)"),
+        decrease_demand_factor: float = typer.Option(None, help="If set, decrease weekly demand by this factor (0-1)")
         ):
     """
     Run bottom-up business forecast for a sample of items.
@@ -582,7 +596,8 @@ def main(
             add_overdue_pos=add_overdue_pos,
             sample_strongly_overdue=sample_strongly_overdue_pos,
             decrease_factor_strongly_overdue_pos=decrease_factor_strongly_overdue_pos,
-            decrease_factor_mildly_overdue_pos=decrease_factor_mildly_overdue_pos
+            decrease_factor_mildly_overdue_pos=decrease_factor_mildly_overdue_pos,
+            decrease_demand_factor=decrease_demand_factor
         )
 
         push_fc_to_dwh(df_result)
