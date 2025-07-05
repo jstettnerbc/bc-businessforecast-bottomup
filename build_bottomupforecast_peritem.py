@@ -461,7 +461,6 @@ def forecast_multiple_items_parallel(
     cols = ['itemNo'] + [c for c in combined_df.columns if c != 'itemNo']
     combined_df = combined_df[cols]
     combined_df['scenario_tag'] = scenario_tag
-    print(combined_df)
     return combined_df
 
 def get_base_items():
