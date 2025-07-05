@@ -171,7 +171,7 @@ sammel_PO_ids = [
 ]
 
 
-def get_incoming_pos(item_no, filterout_sammelpos=False, add_overdue_pos=True, sample_strongly_overdue=True, decrease_factor_strongly_overdue_pos=None) :
+def get_incoming_pos(item_no, filterout_sammelpos=False, add_overdue_pos=True, sample_strongly_overdue=True, decrease_factor_strongly_overdue_pos=None, decrease_factor_mildly_overdue_pos=None) :
     query = f"""
         select documentNo, orderStatus, itemNo, quantityOrdered-quantityReceived as quantityOpen, unitCostThisPurchaseLine, expectedReceiptDate
         from reporting.open_purchaseorder_lines where itemNo = '{item_no}' and expectedReceiptDate < '2030-01-01' order by expectedReceiptDate"""
@@ -241,6 +241,8 @@ def get_incoming_pos(item_no, filterout_sammelpos=False, add_overdue_pos=True, s
         overdue_rows = []
         if add_overdue_pos and not overdue.empty :
             overdue_qty = overdue['quantityOpen'].sum()
+            if decrease_factor_mildly_overdue_pos is not None:
+                overdue_qty = overdue_qty * float(decrease_factor_mildly_overdue_pos)
             overdue_cost = overdue['unitCostThisPurchaseLine'].mean()
             overdue_rows.append({
                 'week_ending_date' : this_week_end.normalize(),
@@ -382,7 +384,8 @@ def run_chain_for_item(
     newbie_salesstart_offset=None,
     add_overdue_pos=True,
     sample_strongly_overdue=True,
-    decrease_factor_strongly_overdue_pos=None
+    decrease_factor_strongly_overdue_pos=None,
+    decrease_factor_mildly_overdue_pos=None
 ):
     current_item_facts = get_item_facts(item_no)
 
@@ -392,7 +395,8 @@ def run_chain_for_item(
         filterout_sammelpos=True,
         add_overdue_pos=add_overdue_pos,
         sample_strongly_overdue=sample_strongly_overdue,
-        decrease_factor_strongly_overdue_pos=decrease_factor_strongly_overdue_pos
+        decrease_factor_strongly_overdue_pos=decrease_factor_strongly_overdue_pos,
+        decrease_factor_mildly_overdue_pos=decrease_factor_mildly_overdue_pos
     )
 
     fc = build_full_forecast(
@@ -418,7 +422,8 @@ def forecast_multiple_items_parallel(
     newbie_salesstart_offset=None,
     add_overdue_pos=True,
     sample_strongly_overdue=True,
-    decrease_factor_strongly_overdue_pos=None
+    decrease_factor_strongly_overdue_pos=None,
+    decrease_factor_mildly_overdue_pos=None
     ):
     args_list = []
     for item in items_list:
@@ -429,7 +434,8 @@ def forecast_multiple_items_parallel(
             newbie_salesstart_offset,
             add_overdue_pos,
             sample_strongly_overdue,
-            decrease_factor_strongly_overdue_pos
+            decrease_factor_strongly_overdue_pos,
+            decrease_factor_mildly_overdue_pos
         ))
 
     results = []
@@ -529,7 +535,8 @@ def main(
         newbie_salesstart_offset: int = typer.Option(0., help="Offset in days for newbie sales start (null demand for first N days after sales start)"),
         add_overdue_pos: bool = typer.Option(True, help="Add overdue PO quantities to first week"),
         sample_strongly_overdue_pos: bool = typer.Option(True, help="Sample strongly overdue POs between today and today+90, otherwise ignore"),
-        decrease_factor_strongly_overdue_pos: float = typer.Option(None, help="If set, decrease strongly overdue PO qty by this factor (0-1)")
+        decrease_factor_strongly_overdue_pos: float = typer.Option(None, help="If set, decrease strongly overdue PO qty by this factor (0-1)"),
+        decrease_factor_mildly_overdue_pos: float = typer.Option(None, help="If set, decrease mildly overdue PO qty by this factor (0-1)")
         ):
     """
     Run bottom-up business forecast for a sample of items.
@@ -574,7 +581,8 @@ def main(
             newbie_salesstart_offset=newbie_salesstart_offset,
             add_overdue_pos=add_overdue_pos,
             sample_strongly_overdue=sample_strongly_overdue_pos,
-            decrease_factor_strongly_overdue_pos=decrease_factor_strongly_overdue_pos
+            decrease_factor_strongly_overdue_pos=decrease_factor_strongly_overdue_pos,
+            decrease_factor_mildly_overdue_pos=decrease_factor_mildly_overdue_pos
         )
 
         push_fc_to_dwh(df_result)
