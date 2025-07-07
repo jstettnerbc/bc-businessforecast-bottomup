@@ -622,9 +622,7 @@ def main(
             decrease_demand_factor=decrease_demand_factor,
             no_realize_potential_until=no_realize_potential_until
         )
-        print(df_result)
-        exit()
-        
+
         push_fc_to_dwh(df_result)
         idx += chunksize
         left = total - idx
