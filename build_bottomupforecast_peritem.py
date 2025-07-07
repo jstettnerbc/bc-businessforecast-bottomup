@@ -145,12 +145,20 @@ def get_demand_fc(item_no, scenario_config=None, newbie_salesstart_offset=None, 
         webshop_is_listed = bool(item_info['webshop_isListedOnline'].iloc[0])
         if (
             webshop_is_listed == False
-            and sales_start_date > today - pd.Timedelta(days=180)
+            and sales_start_date > today - pd.Timedelta(days=360)
         ):
             # If the item is not listed online AND has a reasonable salesStartingDate, we null the demand for the first weeks
             if not weekly_forecast.empty:
+                if sales_start_date > today:
+                    # Apply newbie_salesstart_offset as before
+                    threshold_date = sales_start_date + pd.Timedelta(days=newbie_salesstart_offset)
+                else:
+                    # Put threshold to a random day between today and today+180 days
+                    rng = np.random.default_rng()
+                    random_offset = rng.integers(0, 181)
+                    threshold_date = today + pd.Timedelta(days=int(random_offset))
                 weekly_forecast.loc[
-                    weekly_forecast['week_ending_date'] < (sales_start_date + pd.Timedelta(days=newbie_salesstart_offset)),
+                    weekly_forecast['week_ending_date'] < threshold_date,
                     'forecasted_demand_adjusted'
                 ] = 0
 
