@@ -141,6 +141,7 @@ def get_demand_fc(item_no, scenario_config=None, newbie_salesstart_offset=None, 
 
     # DATABI-506: apply offset for newbie articles, i.e. shift their starting date on the demand side
     if not item_info.empty:
+        ## TODO2: load salesStartingDate from excel file
         sales_start_date = pd.to_datetime(item_info['salesStartingDate'].iloc[0])
         webshop_is_listed = bool(item_info['webshop_isListedOnline'].iloc[0])
         if (
@@ -388,6 +389,7 @@ def build_full_forecast(
                 stock_df.loc[mask, 'incoming_qty'] + stock_df.loc[mask, 'missed_sales_qty'] * realize_potential_factor
             )
             # For weeks on or after the cutoff, incoming_qty remains unchanged
+        ### TODO realize only 50 in August
         else:
             stock_df['incoming_qty'] = stock_df['incoming_qty'] + stock_df['missed_sales_qty'] * realize_potential_factor
 
@@ -596,7 +598,7 @@ def main(
     items_to_process = list(items_to_process.itemNo.astype(int).values)
     print("Subsampled to {} items for process".format(len(items_to_process)))
 
-    chunksize = 4000  # Always use 200, but handle shorter lists gracefully
+    chunksize = 1000  # Always use 200, but handle shorter lists gracefully
 
     idx = 0
     total = len(items_to_process)
