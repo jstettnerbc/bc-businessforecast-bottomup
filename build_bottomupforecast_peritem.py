@@ -32,6 +32,34 @@ if manual_forecast_dfs:
 else:
     manual_forecast_df = None
 
+# Hardcoded path for manual forecast Excel files
+MANUALSALESSTART_FILES = ["data/250730_manualSalesStartingDates.xlsx"]
+
+# Read all Excel files and concatenate them into a single DataFrame
+manual_salesstarting_dfs = []
+for file_path in MANUALSALESSTART_FILES:
+    if os.path.exists(file_path):
+        try:
+            df = pd.read_excel(file_path)
+            manual_salesstarting_dfs.append(df)
+        except Exception as e:
+            print(f"Warning: Could not read {file_path}: {e}")
+
+if manual_salesstarting_dfs:
+    manual_salesstarting_df = pd.concat(manual_salesstarting_dfs, ignore_index=True)
+    # Ensure the 'itemNo' column is present
+    if 'itemNo' not in manual_salesstarting_df.columns:
+        print("Warning: 'itemNo' column not found in manual sales starting dates DataFrame. Please check the Excel file format.")
+        manual_salesstarting_df = None
+    # Ensure 'salesStartingDate' is in datetime format
+    if 'manual_salesStartingDate' in manual_salesstarting_df.columns:
+        manual_salesstarting_df['manual_salesStartingDate'] = pd.to_datetime(manual_salesstarting_df['manual_salesStartingDate'], errors='coerce')
+        # Drop rows where 'salesStartingDate' could not be converted
+        manual_salesstarting_df.dropna(subset=['manual_salesStartingDate'], inplace=True)
+
+else:
+    manual_salesstarting_df = None
+
 
 from connection_configs import ClickhouseConnectionConfig
 warnings.filterwarnings('ignore')
@@ -141,9 +169,15 @@ def get_demand_fc(item_no, scenario_config=None, newbie_salesstart_offset=None, 
 
     # DATABI-506: apply offset for newbie articles, i.e. shift their starting date on the demand side
     if not item_info.empty:
-        ## TODO2: load salesStartingDate from excel file
-        sales_start_date = pd.to_datetime(item_info['salesStartingDate'].iloc[0])
+        # check if manual_salesstarting_df is available and contains the item_no
+        if manual_salesstarting_df is not None and item_no in manual_salesstarting_df['itemNo'].values:
+            sales_start_date = manual_salesstarting_df.loc[manual_salesstarting_df['itemNo'] == item_no, 'manual_salesStartingDate'].iloc[0]
+        else:
+            # Use the salesStartingDate from item_info
+            sales_start_date = pd.to_datetime(item_info['salesStartingDate'].iloc[0])
+
         webshop_is_listed = bool(item_info['webshop_isListedOnline'].iloc[0])
+        # print(f"Item {item_no} - Sales Start Date: {sales_start_date}, Webshop Listed: {webshop_is_listed}")
         if (
             webshop_is_listed == False
             and sales_start_date > today - pd.Timedelta(days=360)
