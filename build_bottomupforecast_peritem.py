@@ -157,7 +157,7 @@ def get_demand_fc(item_no, scenario_config=None, newbie_salesstart_offset=None, 
         # Fill any missing demand with 0 (if any weeks don't belong to any month)
         weekly_df['forecasted_demand_adjusted'].fillna(0, inplace=True)
         return weekly_df
-    
+
     weekly_forecast = distribute_monthly_to_weeks(fc, weekly_index)
     weekly_forecast.reset_index(inplace=True)
     weekly_forecast.rename(columns={'index': 'week_ending_date'}, inplace=True)
@@ -669,7 +669,6 @@ def main(
             decrease_realize_potential_to=decrease_realize_potential_to
 
         )
-
         push_fc_to_dwh(df_result)
         idx += chunksize
         left = total - idx
