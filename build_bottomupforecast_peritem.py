@@ -394,7 +394,8 @@ def build_full_forecast(
     incoming_purchases_df,
     outgoing_demand_df,
     realize_potential_factor=0.0,
-    no_realize_potential_until=None
+    decrease_realize_potential_until=None,
+    decrease_realize_potential_to=None
 ):
     incoming_summary = incoming_purchases_df.set_index('week_ending_date').rename(columns={'quantityOpen': 'incoming_qty', 'unitCostThisPurchaseLine': 'avg_unit_cost'}).copy()
     outgoing_qty = outgoing_demand_df.set_index('week_ending_date')[['forecasted_demand_adjusted']].rename(columns={'forecasted_demand_adjusted': 'planned_outgoing_qty'}).copy()
@@ -416,16 +417,18 @@ def build_full_forecast(
 
     # Realize potential missed sales as additional incoming qty, then recalculate
     if realize_potential_factor > 0:
-        if no_realize_potential_until is not None:
-            # Only apply realize_potential_factor to weeks before the cutoff date
-            mask = stock_df['week_ending_date'] > pd.to_datetime(no_realize_potential_until)
-            stock_df.loc[mask, 'incoming_qty'] = (
-                stock_df.loc[mask, 'incoming_qty'] + stock_df.loc[mask, 'missed_sales_qty'] * realize_potential_factor
+        if decrease_realize_potential_until is not None:
+            # Only apply realize_potential_factor to weeks after the date
+            mask_after = stock_df['week_ending_date'] > pd.to_datetime(decrease_realize_potential_until)
+            stock_df.loc[mask_after, 'incoming_qty'] = (
+                stock_df.loc[mask_after, 'incoming_qty'] + stock_df.loc[mask_after, 'missed_sales_qty'] * realize_potential_factor
             )
-            # For weeks on or after the cutoff, incoming_qty remains unchanged
-        ### TODO realize only 50 in August
+            # For weeks on or before the date, only apply the decreased factor
+            stock_df.loc[~mask_after, 'incoming_qty'] = (
+                    stock_df.loc[~mask_after, 'incoming_qty'] + stock_df.loc[~mask_after, 'missed_sales_qty'] * decrease_realize_potential_to)
         else:
             stock_df['incoming_qty'] = stock_df['incoming_qty'] + stock_df['missed_sales_qty'] * realize_potential_factor
+
 
         stock_balances, lost_sales_qty, fulfilled_demands = _calculate_stock_measures(stock_df, available_stock)
         stock_df['stock_balance'] = stock_balances
@@ -445,7 +448,8 @@ def run_chain_for_item(
     decrease_factor_strongly_overdue_pos=None,
     decrease_factor_mildly_overdue_pos=None,
     decrease_demand_factor=None,
-    no_realize_potential_until=None
+    decrease_realize_potential_until=None,
+decrease_realize_potential_to=None
 ):
     current_item_facts = get_item_facts(item_no)
 
@@ -472,7 +476,8 @@ def run_chain_for_item(
         incoming_purchases_df=incoming,
         outgoing_demand_df=demand,
         realize_potential_factor=realize_potential_factor,
-        no_realize_potential_until=no_realize_potential_until
+        decrease_realize_potential_until=decrease_realize_potential_until,
+        decrease_realize_potential_to=decrease_realize_potential_to
     )
 
     fc['itemNo'] = item_no
@@ -491,7 +496,8 @@ def forecast_multiple_items_parallel(
     decrease_factor_strongly_overdue_pos=None,
     decrease_factor_mildly_overdue_pos=None,
     decrease_demand_factor=None,
-    no_realize_potential_until=None
+    decrease_realize_potential_until=None,
+decrease_realize_potential_to=None
     ):
     args_list = []
     for item in items_list:
@@ -505,7 +511,8 @@ def forecast_multiple_items_parallel(
             decrease_factor_strongly_overdue_pos,
             decrease_factor_mildly_overdue_pos,
             decrease_demand_factor,
-            no_realize_potential_until
+            decrease_realize_potential_until,
+            decrease_realize_potential_to
         ))
 
     results = []
@@ -608,7 +615,9 @@ def main(
         decrease_factor_strongly_overdue_pos: float = typer.Option(None, help="If set, decrease strongly overdue PO qty by this factor (0-1)"),
         decrease_factor_mildly_overdue_pos: float = typer.Option(None, help="If set, decrease mildly overdue PO qty by this factor (0-1)"),
         decrease_demand_factor: float = typer.Option(None, help="If set, decrease weekly demand by this factor (0-1)"),
-        no_realize_potential_until: str = typer.Option(None, help="If set, do not realize potential until this date (YYYY-MM-DD)")
+        decrease_realize_potential_until: str = typer.Option(None, help="If set, decrease realize potential until this date (YYYY-MM-DD)"),
+        decrease_realize_potential_to: float = typer.Option(None,
+                                                            help="If set, decrease the realize potential to this factor (0-1) after the decrease_realize_potential_until date")
         ):
     """
     Run bottom-up business forecast for a sample of items.
@@ -656,7 +665,9 @@ def main(
             decrease_factor_strongly_overdue_pos=decrease_factor_strongly_overdue_pos,
             decrease_factor_mildly_overdue_pos=decrease_factor_mildly_overdue_pos,
             decrease_demand_factor=decrease_demand_factor,
-            no_realize_potential_until=no_realize_potential_until
+            decrease_realize_potential_until=decrease_realize_potential_until,
+            decrease_realize_potential_to=decrease_realize_potential_to
+
         )
 
         push_fc_to_dwh(df_result)
