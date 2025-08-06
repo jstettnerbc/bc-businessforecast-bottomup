@@ -90,7 +90,7 @@ def fitSinusiod(df):
     if mask.mean() < 0.2:
         # Too much good availability: skip fitting and return NULL (NaN)
         df['sinusoidal_prediction'] = np.nan
-        print(f"Skipping sinusoidal fit because availability was too bad")
+        # print(f"Skipping sinusoidal fit because availability was too bad")
     else:
         # Proceed with sinusoidal fit
 
@@ -176,7 +176,7 @@ def correctForMissedSales(df):
     
 
 import_correctSalesToDiskover = []
-for testItemNo in tqdm.tqdm(['1000004203','1000143783']):#,'1000314922','1000143783','1000000401','1000004203','1000065221','1000253999','1000226431']):
+for testItemNo in tqdm.tqdm(combined_df.itemNo.values):#['1000004203','1000143783']):#,'1000314922','1000143783','1000000401','1000004203','1000065221','1000253999','1000226431']):
     # get some info about the test_itemNo
     test_df = combined_df.loc[combined_df.itemNo==testItemNo]
     test_df = correctForMissedSales(test_df)
@@ -200,7 +200,7 @@ for testItemNo in tqdm.tqdm(['1000004203','1000143783']):#,'1000314922','1000143
 import_correctSalesToDiskover = pd.concat(import_correctSalesToDiskover, ignore_index=True)
 timestamp = datetime.datetime.now().strftime("%Y-%m-%d:%H-%M")
 
-import_correctSalesToDiskover.to_csv(timestamp+"_missedSalesCorrectionForDiskover.csv", index=False, sep=";")
+import_correctSalesToDiskover.to_csv("./data/"+timestamp+"_missedSalesCorrectionForDiskover.csv", index=False, sep=";")
 
 # %%
 
